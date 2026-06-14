@@ -12,7 +12,7 @@ Everything has been implemented in a cyclic interrupt OB35 of 12.5 ms of samplin
 For comparisons, use the same parameters for both controllers.
 model used: '5MW_Land_DLL_WTurb'
 
-# # Intellectual Property and License
+# Intellectual Property and License
 Copyright (C) 2026 Germán Corredera Serrano. All rights reserved.
 The code is exposed exclusively for academic and demonstrative purposes. Its reproduction or commercial use without explicit authorization from the author is prohibited.
 
