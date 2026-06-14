@@ -1,0 +1,1550 @@
+﻿FUNCTION_BLOCK "FB_HPFilter"
+TITLE = 'Filtro Paso Alto de Primer Orden (Discreto)'
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+   VAR_INPUT 
+      i_signal : LReal;
+      i_DT : LReal;
+      i_freq : LReal;
+      i_reset : Bool;
+      i_useInicialValue : Bool;
+      i_initialValue : LReal;
+   END_VAR
+
+   VAR_OUTPUT 
+      q_fignal_flt : LReal;
+   END_VAR
+
+   VAR 
+      FirstRun : Bool := TRUE;
+      InputSignalLast : LReal;
+      OutputSignalLast : LReal;
+      Coeff_X0 : LReal;
+      Coeff_X1 : LReal;
+      Coeff_Y1 : LReal;
+   END_VAR
+
+   VAR_TEMP 
+      temp_initVal : LReal;
+      temp_k : LReal;
+      temp_denom : LReal;
+   END_VAR
+
+
+BEGIN
+	    IF #i_useInicialValue THEN
+	        #temp_initVal := #i_initialValue;
+	    ELSE
+	        #temp_initVal := #i_signal;
+	    END_IF;
+	    IF #FirstRun OR #i_reset THEN
+	        #OutputSignalLast := #temp_initVal;
+	        #InputSignalLast := #temp_initVal;
+	        #temp_k := 2.0 / #i_DT;
+	        #temp_denom := #i_freq + #temp_k;
+	        
+	        #Coeff_X0 := #temp_k / #temp_denom;
+	        #Coeff_X1 := - #temp_k / #temp_denom;
+	        #Coeff_Y1 := - ((#i_freq - #temp_k) / #temp_denom);
+	        
+	        #FirstRun := FALSE;
+	    END_IF;
+	    
+	#q_fignal_flt := (#Coeff_X0 * #i_signal) + (#Coeff_X1 * #InputSignalLast) + (#Coeff_Y1 * #OutputSignalLast);
+	#InputSignalLast := #i_signal;
+	#OutputSignalLast := #q_fignal_flt;
+END_FUNCTION_BLOCK
+
+FUNCTION_BLOCK "FB_PIController"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+   VAR_INPUT 
+      i_error : Real;
+      i_kp : Real;
+      i_ki : Real;
+      i_minValue : Real;
+      i_maxValue : Real;
+      i_DT : Real;
+      i_I0 : Real;
+      i_Reset : Bool;
+   END_VAR
+
+   VAR_OUTPUT 
+      q_PIController : Real;
+   END_VAR
+
+   VAR 
+      stat_integral : Real;
+      stat_ITerm : Real;
+      stat_ITermLast : Real;
+   END_VAR
+
+   VAR_TEMP 
+      temp_proporcional : Real;
+      temp_q_notSat : Real;
+      temp_PTerm : Real;
+   END_VAR
+
+
+BEGIN
+	// Bumpless transfer
+	IF #i_Reset THEN
+	    #stat_ITerm := #i_I0;
+	    #stat_ITermLast := #i_I0;
+	    #q_PIController := #i_I0;
+	        
+	ELSE
+	    // Termino proporcional
+	    #temp_PTerm := #i_kp * #i_error;
+	    
+	    // Termino integral
+	    #stat_ITerm := #stat_ITerm + (#i_DT * #i_ki * #i_error);
+	    
+	    // Anti-Windup aplicado al termino integral
+	    #stat_ITerm := LIMIT(MN := #i_minValue, IN := #stat_ITerm, MX := #i_maxValue);
+	    
+	    // Salida final saturada
+	    #q_PIController := LIMIT(MN := #i_minValue, IN := (#temp_PTerm + #stat_ITerm), MX := #i_maxValue);
+	    
+	    // Guardado del estado anterior
+	    #stat_ITermLast := #stat_ITerm;
+	    
+	END_IF;
+END_FUNCTION_BLOCK
+
+DATA_BLOCK "inst_AccPI"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+"FB_PIController"
+
+BEGIN
+
+END_DATA_BLOCK
+
+DATA_BLOCK "inst_AccHPF"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+"FB_HPFilter"
+
+BEGIN
+
+END_DATA_BLOCK
+
+DATA_BLOCK "DatosGlobales"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+   VAR 
+      g_potencia_kW : Real;
+      g_torqAutoMode : Bool;
+      g_bldPitchAutoMode : Bool;
+      g_bldPitchManualValue : Int;
+      g_torqManualValue : DInt;
+      g_marcha : Bool;
+      g_paroEmerg : Bool;
+      g_timeCpu : Time;
+      g_IPC_activo : Bool;
+      g_setpointS_activo : Bool;
+      g_peakS_activo : Bool;
+      g_FA_activo : Bool;
+      g_stop_start_up : Bool;
+   END_VAR
+
+
+BEGIN
+   g_torqAutoMode := TRUE;
+   g_bldPitchAutoMode := TRUE;
+   g_IPC_activo := TRUE;
+   g_setpointS_activo := TRUE;
+   g_peakS_activo := TRUE;
+   g_FA_activo := TRUE;
+   g_stop_start_up := TRUE;
+
+END_DATA_BLOCK
+
+FUNCTION_BLOCK "FB_ForeAftDamping"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+   VAR_INPUT 
+      i_FA_Acc : Real;
+      i_enable : Bool;
+   END_VAR
+
+   VAR_OUTPUT 
+      q_FA_PitCom : Real;
+   END_VAR
+
+   VAR_TEMP 
+      FA_AccHPF : LReal;
+      FA_AccHPFI : Real;
+   END_VAR
+
+   VAR CONSTANT 
+      FA_KI : Real := 0.025;
+      FA_HPF_CornerFreq : Real := 0.15;
+      FA_IntSat : Real := 0.087;
+   END_VAR
+
+
+BEGIN
+	"inst_AccHPF"(i_signal:=#i_FA_Acc,
+	              i_DT:=0.0125,
+	              i_freq:=#FA_HPF_CornerFreq,
+	              i_reset:=NOT "DatosGlobales".g_bldPitchAutoMode,
+	              i_useInicialValue:=FALSE,
+	              i_initialValue:=0.0,
+	              q_fignal_flt=>#FA_AccHPF);
+	
+	
+	"inst_AccPI"(i_error:=#FA_AccHPF,
+	                  i_kp:=0.0,
+	                  i_ki:=#FA_KI,
+	                  i_minValue:=-#FA_IntSat,
+	                  i_maxValue:=#FA_IntSat,
+	                  i_DT:=0.0125,
+	                  i_I0:=0.0,
+	                  i_Reset:=NOT "DatosGlobales".g_bldPitchAutoMode ,
+	                  q_PIController=>#FA_AccHPFI);
+	
+	IF #i_enable THEN
+	    #q_FA_PitCom := #FA_AccHPFI;
+	ELSE
+	    #q_FA_PitCom := 0.0;
+	END_IF;
+	
+	
+END_FUNCTION_BLOCK
+
+FUNCTION_BLOCK "FB_LPFilter"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+   VAR_INPUT 
+      i_LPfilter : Real;
+      i_DT : Real;
+      i_freq : Real;
+      i_reset : Bool;
+   END_VAR
+
+   VAR_OUTPUT 
+      q_flt_sign : Real;
+   END_VAR
+
+   VAR 
+      stat_x_ant : Real;
+      stat_y_ant : Real;
+      stat_a1 : Real;
+      stat_a0 : Real;
+      stat_b1 : Real;
+      stat_b0 : Real;
+      stat_init_done : Bool := FALSE;
+   END_VAR
+
+
+BEGIN
+	
+	IF (NOT #"stat_init_done") OR #i_reset THEN
+	    #stat_x_ant := #i_LPfilter;
+	    #stat_y_ant := #i_LPfilter;
+	    #stat_a1 := 2.0 + (#i_freq * #i_DT);
+	    #stat_a0 := (#i_freq * #i_DT) - 2.0;
+	    #stat_b1 := #i_freq * #i_DT;
+	    #stat_b0 := #i_freq * #i_DT;
+	    
+	    #"stat_init_done" := TRUE;
+	END_IF;
+	
+	// ecuacion del filtro
+	#q_flt_sign := (1.0 / #stat_a1) * ((- #stat_a0 * #stat_y_ant) + (#stat_b1 * #i_LPfilter) + (#stat_b0 * #stat_x_ant));
+	
+	
+	#stat_x_ant := #i_LPfilter;
+	#stat_y_ant := #q_flt_sign;
+	
+END_FUNCTION_BLOCK
+
+FUNCTION_BLOCK "FB_NotchFilterSlopes"
+TITLE = 'Notch Filter Slopes'
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+// Discrete time inverted Notch Filter with descending slopes
+// G = CornerFreq*s/(Damp*s^2+CornerFreq*s+Damp*CornerFreq^2)
+   VAR_INPUT 
+      i_signal : LReal;
+      i_DT : LReal;
+      i_freq : LReal;
+      i_damp : LReal;
+      i_status : Int;
+      i_reset : Bool;
+      i_moving : Bool;
+      i_useInitialValue : Bool;
+      i_nitialValue : LReal;
+   END_VAR
+
+   VAR_OUTPUT 
+      q_signal_flt : LReal;
+   END_VAR
+
+   VAR 
+      OutputSignalLast1 : LReal;
+      OutputSignalLast2 : LReal;
+      InputSignalLast1 : LReal;
+      InputSignalLast2 : LReal;
+      b2 : LReal;
+      b0 : LReal;
+      a2 : LReal;
+      a1 : LReal;
+      a0 : LReal;
+   END_VAR
+
+   VAR_TEMP 
+      "InitialValue_" : LReal;
+      "CornerFreq_" : LReal;
+   END_VAR
+
+
+BEGIN
+	
+	IF #i_useInitialValue THEN
+	    #"InitialValue_" := #i_nitialValue;
+	ELSE
+	    #"InitialValue_" := #i_signal;
+	END_IF;
+	
+	IF #i_freq < 0.0 THEN
+	    #"CornerFreq_" := 0.0;
+	ELSE
+	    #"CornerFreq_" := #i_freq;
+	END_IF;
+	
+	
+	IF (#i_status = 0) OR #i_reset THEN
+	    #OutputSignalLast1 := #"InitialValue_";
+	    #OutputSignalLast2 := #"InitialValue_";
+	    #InputSignalLast1 := #"InitialValue_";
+	    #InputSignalLast2 := #"InitialValue_";
+	END_IF;
+	
+	IF (#i_status = 0) OR #i_reset OR #i_moving THEN
+	    #b2 := 2.0 * #i_DT * #"CornerFreq_";
+	    #b0 := - #b2;
+	    
+	    #a2 := #i_damp * (#i_DT * #i_DT) * (#"CornerFreq_" * #"CornerFreq_") + 2.0 * #i_DT * #"CornerFreq_" + 4.0 * #i_damp;
+	    #a1 := 2.0 * #i_damp * (#i_DT * #i_DT) * (#"CornerFreq_" * #"CornerFreq_") - 8.0 * #i_damp;
+	    #a0 := #i_damp * (#i_DT * #i_DT) * (#"CornerFreq_" * #"CornerFreq_") - 2.0 * #i_DT * #"CornerFreq_" + 4.0 * #i_damp;
+	END_IF;
+	
+	
+	// CORRECCIÓN: Cambiar #InputSignalLast1 por #InputSignalLast2 en el multiplicador de #b0
+	IF #a2 <> 0.0 THEN
+	    #q_signal_flt := (1.0 / #a2) * ((#b2 * #i_signal) + (#b0 * #InputSignalLast1) - (#a1 * #OutputSignalLast1) - (#a0 * #OutputSignalLast2));
+	ELSE
+	    #q_signal_flt := #i_signal;
+	END_IF;
+	
+	#InputSignalLast2 := #InputSignalLast1;
+	#InputSignalLast1 := #i_signal;
+	
+	#OutputSignalLast2 := #OutputSignalLast1;
+	#OutputSignalLast1 := #q_signal_flt;
+	
+END_FUNCTION_BLOCK
+
+FUNCTION_BLOCK "FB_SecLPFilter"
+TITLE = 'Filtro Paso Bajo de Segundo Orden'
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+   VAR_INPUT 
+      i_signal : LReal;
+      i_DT : LReal;
+      i_freq : LReal;
+      i_damp : LReal;
+      i_reset : Bool;
+      i_useInitialValue : Bool;
+      i_initialValue : LReal;
+   END_VAR
+
+   VAR_OUTPUT 
+      q_signal_flt : Real;
+   END_VAR
+
+   VAR 
+      FirstRun : Bool := TRUE;
+      InputSignalLast1 : LReal;
+      InputSignalLast2 : LReal;
+      OutputSignalLast1 : LReal;
+      OutputSignalLast2 : LReal;
+      a0 : LReal;
+      a1 : LReal;
+      a2 : LReal;
+      b0 : LReal;
+      b1 : LReal;
+      b2 : LReal;
+   END_VAR
+
+   VAR_TEMP 
+      temp_initVal : LReal;
+   END_VAR
+
+
+BEGIN
+	IF #i_useInitialValue THEN
+	    #temp_initVal := #i_initialValue;
+	ELSE
+	    #temp_initVal := #i_signal;
+	END_IF;
+	    
+	
+	IF #FirstRun OR #i_reset THEN
+	    
+	    #OutputSignalLast1 := #temp_initVal;
+	    #OutputSignalLast2 := #temp_initVal;
+	    #InputSignalLast1 := #temp_initVal;
+	    #InputSignalLast2 := #temp_initVal;
+	    
+	    
+	    #a2 := (#i_DT ** 2.0 * #i_freq ** 2.0) + 4.0 + (4.0 * #i_damp * #i_freq * #i_DT);
+	    #a1 := (2.0 * #i_DT ** 2.0 * #i_freq ** 2.0) - 8.0;
+	    #a0 := (#i_DT ** 2.0 * #i_freq ** 2.0) + 4.0 - (4.0 * #i_damp * #i_freq * #i_DT);
+	    
+	    #b2 := (#i_DT ** 2.0 * #i_freq ** 2.0);
+	    #b1 := (2.0 * #i_DT ** 2.0 * #i_freq ** 2.0);
+	    #b0 := (#i_DT ** 2.0 * #i_freq ** 2.0);
+	    
+	    
+	    #FirstRun := FALSE;
+	END_IF;
+	
+	
+	#q_signal_flt := LREAL_TO_REAL((1.0 / #a2) * ((#b2 * #i_signal) +
+	(#b1 * #InputSignalLast1) +
+	(#b0 * #InputSignalLast2) -
+	(#a1 * #OutputSignalLast1) -
+	(#a0 * #OutputSignalLast2)));
+	
+	
+	#InputSignalLast2 := #InputSignalLast1;
+	#InputSignalLast1 := #i_signal;
+	#OutputSignalLast2 := #OutputSignalLast1;
+	#OutputSignalLast1 := #q_signal_flt;
+	    
+END_FUNCTION_BLOCK
+
+FUNCTION_BLOCK "FB_SetPointSmoother"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+   VAR_INPUT 
+      i_enable_smoothing : Bool;
+      i_bldPitch1 : Real;
+      i_pitchMin : Real;
+      i_pwrRated : Real;
+      i_pwrMedido : Real;
+      i_refSpeed : Real;
+      i_gainVS : Real;
+      i_gainPC : Real;
+      i_freq : Real;
+      i_DT : Real := 0.0125;
+   END_VAR
+
+   VAR_OUTPUT 
+      q_omega_flt : Real;
+   END_VAR
+
+   VAR 
+      stat_xAnt : Real;
+      stat_InitDone : Bool;
+   END_VAR
+
+   VAR_TEMP 
+      temp_omegaRaw : Real;
+      temp_alpha : Real;
+      temp_a1 : Real;
+      temp_a0 : Real;
+      temp_b : Real;
+   END_VAR
+
+
+BEGIN
+	
+	IF #i_enable_smoothing THEN
+	    #temp_omegaRaw := (((#i_bldPitch1 - #i_pitchMin) / 0.524) * #i_gainVS) -
+	    (((#i_pwrRated) - #i_pwrMedido) / #i_pwrRated * #i_gainPC);
+	    #temp_omegaRaw := #temp_omegaRaw * #i_refSpeed;
+	    
+	    
+	
+	    IF NOT #stat_InitDone THEN
+	        #q_omega_flt := #temp_omegaRaw;
+	        #stat_xAnt := #temp_omegaRaw;
+	        #stat_InitDone := TRUE;
+	    END_IF;
+	
+	    #temp_a1 := 2.0 + (#i_freq * #i_DT);
+	    #temp_a0 := (#i_freq * #i_DT) - 2.0;
+	    #temp_b := #i_freq * #i_DT;
+	    
+	    #q_omega_flt := (1.0 / #temp_a1) * (- (#temp_a0 * #q_omega_flt) + (#temp_b * #temp_omegaRaw) + (#temp_b * #stat_xAnt));
+	    
+	    // Actualizar memorias para el siguiente ciclo
+	    #stat_xAnt := #temp_omegaRaw;
+	    
+	ELSE
+	    #q_omega_flt := 0.0;
+	    #stat_InitDone := FALSE; // forzar reinicio si se reactiva el smoothing
+	END_IF;
+END_FUNCTION_BLOCK
+
+FUNCTION "FC_ColemanTransform" : Void
+TITLE = 'Coleman Transform (d-q axis)'
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+// Transforms root out-of-plane bending moments to direct and quadrature axes
+   VAR_INPUT 
+      i_rootMOOP : Array[1..3] of LReal;
+      i_aziAngle : LReal;
+      i_nHarmonic : Int;
+   END_VAR
+
+   VAR_OUTPUT 
+      q_axTOut : Real;
+      q_axYOut : Real;
+   END_VAR
+
+   VAR_TEMP 
+      temp_phi2 : LReal;
+      temp_phi3 : LReal;
+      temp_harmonic : LReal;
+   END_VAR
+
+   VAR CONSTANT 
+      PI : Real := 3.141593;
+   END_VAR
+
+
+BEGIN
+	#temp_phi2 := (2.0 / 3.0) * #PI;
+	#temp_phi3 := (4.0 / 3.0) * #PI;
+	#temp_harmonic := INT_TO_LREAL(#i_nHarmonic);
+	#q_axTOut := LREAL_TO_REAL((2.0 / 3.0) * (
+	(COS(#temp_harmonic * #i_aziAngle) * #i_rootMOOP[1]) +
+	(COS(#temp_harmonic * (#i_aziAngle + #temp_phi2)) * #i_rootMOOP[2]) +
+	(COS(#temp_harmonic * (#i_aziAngle + #temp_phi3)) * #i_rootMOOP[3])
+	));
+	#q_axYOut := LREAL_TO_REAL((2.0 / 3.0) * (
+	(SIN(#temp_harmonic * #i_aziAngle) * #i_rootMOOP[1]) +
+	(SIN(#temp_harmonic * (#i_aziAngle + #temp_phi2)) * #i_rootMOOP[2]) +
+	(SIN(#temp_harmonic * (#i_aziAngle + #temp_phi3)) * #i_rootMOOP[3])
+	));
+END_FUNCTION
+
+DATA_BLOCK "inst_NotchFilterSlopes2"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+"FB_NotchFilterSlopes"
+
+BEGIN
+
+END_DATA_BLOCK
+
+DATA_BLOCK "inst_NotchFilterSlopes3"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+"FB_NotchFilterSlopes"
+
+BEGIN
+
+END_DATA_BLOCK
+
+DATA_BLOCK "inst_PI_1_5"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+"FB_PIController"
+
+BEGIN
+
+END_DATA_BLOCK
+
+DATA_BLOCK "inst_NotchFilterSlopes1"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+"FB_NotchFilterSlopes"
+
+BEGIN
+
+END_DATA_BLOCK
+
+DATA_BLOCK "inst_PI_2_5"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+"FB_PIController"
+
+BEGIN
+
+END_DATA_BLOCK
+
+DATA_BLOCK "inst_PI_IPC_T"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+"FB_PIController"
+
+BEGIN
+
+END_DATA_BLOCK
+
+DATA_BLOCK "inst_PI_IPC_Y"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+"FB_PIController"
+
+BEGIN
+
+END_DATA_BLOCK
+
+DATA_BLOCK "Inst_SetpointS"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+"FB_SetPointSmoother"
+
+BEGIN
+
+END_DATA_BLOCK
+
+DATA_BLOCK "Inst_PeakS"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+// NÃºmero total de puntos en la tabla
+   VAR 
+      PS_Num_Puntos : Int;
+      PS_BldPitchMin : Array[1..60] of Real;
+      PS_WindSpeeds : Array[1..60] of Real;
+      g_bldPitchMinSS : Real;
+   END_VAR
+
+
+BEGIN
+   PS_Num_Puntos := 60;
+   PS_BldPitchMin[1] := 0.001;
+   PS_BldPitchMin[2] := 0.001;
+   PS_BldPitchMin[3] := 0.001;
+   PS_BldPitchMin[4] := 0.001;
+   PS_BldPitchMin[5] := 0.001;
+   PS_BldPitchMin[6] := 0.001;
+   PS_BldPitchMin[7] := 0.001;
+   PS_BldPitchMin[8] := 0.001;
+   PS_BldPitchMin[9] := 0.001;
+   PS_BldPitchMin[10] := 0.001;
+   PS_BldPitchMin[11] := 0.001;
+   PS_BldPitchMin[12] := 0.001;
+   PS_BldPitchMin[13] := 0.001;
+   PS_BldPitchMin[14] := 0.001;
+   PS_BldPitchMin[15] := 0.001;
+   PS_BldPitchMin[16] := 0.001;
+   PS_BldPitchMin[17] := 0.001;
+   PS_BldPitchMin[18] := 0.001;
+   PS_BldPitchMin[19] := 0.001;
+   PS_BldPitchMin[20] := 0.001;
+   PS_BldPitchMin[21] := 0.001;
+   PS_BldPitchMin[22] := 0.001;
+   PS_BldPitchMin[23] := 0.001;
+   PS_BldPitchMin[24] := 0.001;
+   PS_BldPitchMin[25] := 0.001;
+   PS_BldPitchMin[26] := 0.001;
+   PS_BldPitchMin[27] := 0.011;
+   PS_BldPitchMin[28] := 0.023;
+   PS_BldPitchMin[29] := 0.032;
+   PS_BldPitchMin[30] := 0.04;
+   PS_BldPitchMin[31] := 0.047;
+   PS_BldPitchMin[32] := 0.059;
+   PS_BldPitchMin[33] := 0.07;
+   PS_BldPitchMin[34] := 0.081;
+   PS_BldPitchMin[35] := 0.091;
+   PS_BldPitchMin[36] := 0.102;
+   PS_BldPitchMin[37] := 0.112;
+   PS_BldPitchMin[38] := 0.122;
+   PS_BldPitchMin[39] := 0.131;
+   PS_BldPitchMin[40] := 0.141;
+   PS_BldPitchMin[41] := 0.15;
+   PS_BldPitchMin[42] := 0.16;
+   PS_BldPitchMin[43] := 0.169;
+   PS_BldPitchMin[44] := 0.178;
+   PS_BldPitchMin[45] := 0.187;
+   PS_BldPitchMin[46] := 0.196;
+   PS_BldPitchMin[47] := 0.205;
+   PS_BldPitchMin[48] := 0.214;
+   PS_BldPitchMin[49] := 0.223;
+   PS_BldPitchMin[50] := 0.232;
+   PS_BldPitchMin[51] := 0.24;
+   PS_BldPitchMin[52] := 0.249;
+   PS_BldPitchMin[53] := 0.257;
+   PS_BldPitchMin[54] := 0.266;
+   PS_BldPitchMin[55] := 0.274;
+   PS_BldPitchMin[56] := 0.282;
+   PS_BldPitchMin[57] := 0.29;
+   PS_BldPitchMin[58] := 0.299;
+   PS_BldPitchMin[59] := 0.307;
+   PS_BldPitchMin[60] := 0.315;
+   PS_WindSpeeds[1] := 3.0;
+   PS_WindSpeeds[2] := 3.29;
+   PS_WindSpeeds[3] := 3.579;
+   PS_WindSpeeds[4] := 3.869;
+   PS_WindSpeeds[5] := 4.159;
+   PS_WindSpeeds[6] := 4.448;
+   PS_WindSpeeds[7] := 4.738;
+   PS_WindSpeeds[8] := 5.028;
+   PS_WindSpeeds[9] := 5.317;
+   PS_WindSpeeds[10] := 5.607;
+   PS_WindSpeeds[11] := 5.897;
+   PS_WindSpeeds[12] := 6.186;
+   PS_WindSpeeds[13] := 6.476;
+   PS_WindSpeeds[14] := 6.766;
+   PS_WindSpeeds[15] := 7.055;
+   PS_WindSpeeds[16] := 7.345;
+   PS_WindSpeeds[17] := 7.634;
+   PS_WindSpeeds[18] := 7.924;
+   PS_WindSpeeds[19] := 8.214;
+   PS_WindSpeeds[20] := 8.503;
+   PS_WindSpeeds[21] := 8.793;
+   PS_WindSpeeds[22] := 9.083;
+   PS_WindSpeeds[23] := 9.372;
+   PS_WindSpeeds[24] := 9.662;
+   PS_WindSpeeds[25] := 9.952;
+   PS_WindSpeeds[26] := 10.241;
+   PS_WindSpeeds[27] := 10.531;
+   PS_WindSpeeds[28] := 10.821;
+   PS_WindSpeeds[29] := 11.11;
+   PS_WindSpeeds[30] := 11.4;
+   PS_WindSpeeds[31] := 11.853;
+   PS_WindSpeeds[32] := 12.307;
+   PS_WindSpeeds[33] := 12.76;
+   PS_WindSpeeds[34] := 13.213;
+   PS_WindSpeeds[35] := 13.667;
+   PS_WindSpeeds[36] := 14.12;
+   PS_WindSpeeds[37] := 14.573;
+   PS_WindSpeeds[38] := 15.027;
+   PS_WindSpeeds[39] := 15.48;
+   PS_WindSpeeds[40] := 15.933;
+   PS_WindSpeeds[41] := 16.387;
+   PS_WindSpeeds[42] := 16.84;
+   PS_WindSpeeds[43] := 17.293;
+   PS_WindSpeeds[44] := 17.747;
+   PS_WindSpeeds[45] := 18.2;
+   PS_WindSpeeds[46] := 18.653;
+   PS_WindSpeeds[47] := 19.107;
+   PS_WindSpeeds[48] := 19.56;
+   PS_WindSpeeds[49] := 20.013;
+   PS_WindSpeeds[50] := 20.467;
+   PS_WindSpeeds[51] := 20.92;
+   PS_WindSpeeds[52] := 21.373;
+   PS_WindSpeeds[53] := 21.827;
+   PS_WindSpeeds[54] := 22.28;
+   PS_WindSpeeds[55] := 22.733;
+   PS_WindSpeeds[56] := 23.187;
+   PS_WindSpeeds[57] := 23.64;
+   PS_WindSpeeds[58] := 24.093;
+   PS_WindSpeeds[59] := 24.547;
+   PS_WindSpeeds[60] := 25.0;
+
+END_DATA_BLOCK
+
+DATA_BLOCK "Inst_ForeAftDamping"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+"FB_ForeAftDamping"
+
+BEGIN
+
+END_DATA_BLOCK
+
+DATA_BLOCK "inst_BldPitchPI"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+"FB_PIController"
+
+BEGIN
+
+END_DATA_BLOCK
+
+DATA_BLOCK "inst_FiltroGenSpeed"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+"FB_LPFilter"
+
+BEGIN
+
+END_DATA_BLOCK
+
+DATA_BLOCK "inst_BldPitchSecLPFilter"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+"FB_SecLPFilter"
+
+BEGIN
+
+END_DATA_BLOCK
+
+DATA_BLOCK "IPC"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+   VAR 
+      PitComIPC_1P : Array[0..2] of LReal;
+   END_VAR
+
+
+BEGIN
+
+END_DATA_BLOCK
+
+FUNCTION "FC_Sigma" : Real
+TITLE = 'Generic Sigma Function'
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+// Creado para Soft Cut-in. InterpolaciÃ³n cÃºbica suave entre (x0, y0) y (x1, y1)
+   VAR_INPUT 
+      x : LReal;
+      x0 : LReal;
+      x1 : LReal;
+      y0 : LReal;
+      y1 : LReal;
+   END_VAR
+
+   VAR_TEMP 
+      t_dx : LReal;
+      t_dx3 : LReal;
+      t_a3 : LReal;
+      t_a2 : LReal;
+      t_a1 : LReal;
+      t_a0 : LReal;
+      t_x2 : LReal;
+      t_x3 : LReal;
+   END_VAR
+
+
+BEGIN
+	IF #x <= #x0 THEN
+	    #FC_Sigma := #y0;
+	    RETURN;
+	ELSIF #x >= #x1 THEN
+	    #FC_Sigma := #y1;
+	    RETURN;
+	END_IF;
+	
+	#t_dx := #x0 - #x1;
+	
+	IF ABS(#t_dx) < 1.0E-6 THEN
+	    #FC_Sigma := #y1;
+	    RETURN;
+	END_IF;
+	
+	#t_dx3 := #t_dx * #t_dx * #t_dx;
+	#t_x2 := #x * #x;
+	#t_x3 := #t_x2 * #x;
+	
+	#t_a3 := 2.0 / #t_dx3;
+	#t_a2 := -3.0 * (#x0 + #x1) / #t_dx3;
+	#t_a1 := 6.0 * #x1 * #x0 / #t_dx3;
+	#t_a0 := (#x0 - 3.0 * #x1) * (#x0 * #x0) / #t_dx3;
+	
+	#FC_Sigma := LREAL_TO_REAL(((#t_a3 * #t_x3) + (#t_a2 * #t_x2) + (#t_a1 * #x) + #t_a0) * (#y1 - #y0) + #y0);
+	
+END_FUNCTION
+
+FUNCTION "FC_ColemanTransformInverse" : Void
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+   VAR_INPUT 
+      i_axTIn : LReal;
+      i_axYIn : LReal;
+      i_aziAngle : LReal;
+      i_aziOffset : LReal;
+      i_nHarmonic : Int;
+   END_VAR
+
+   VAR_OUTPUT 
+      q_pitComIPC : Array[1..3] of LReal;
+   END_VAR
+
+   VAR_TEMP 
+      temp_nHarmonicLR : LReal;
+      temp_baseAngle : LReal;
+   END_VAR
+
+   VAR CONSTANT 
+      PI : LReal := 3.14159265358979;
+      PHI2 : LReal := 2.0943951023932;
+      PHI3 : LReal := 4.18879020478639;
+   END_VAR
+
+
+BEGIN
+	#temp_nHarmonicLR := INT_TO_LREAL(#i_nHarmonic);
+	#temp_baseAngle := #i_aziAngle + #i_aziOffset;
+	
+	// Blade 1
+	#q_pitComIPC[1] := COS(#temp_nHarmonicLR * #temp_baseAngle) * #i_axTIn
+	+ SIN(#temp_nHarmonicLR * #temp_baseAngle) * #i_axYIn;
+	
+	// Blade 2
+	#q_pitComIPC[2] := COS(#temp_nHarmonicLR * (#temp_baseAngle + #PHI2)) * #i_axTIn
+	+ SIN(#temp_nHarmonicLR * (#temp_baseAngle + #PHI2)) * #i_axYIn;
+	
+	// Blade 3
+	#q_pitComIPC[3] := COS(#temp_nHarmonicLR * (#temp_baseAngle + #PHI3)) * #i_axTIn
+	+ SIN(#temp_nHarmonicLR * (#temp_baseAngle + #PHI3)) * #i_axYIn;
+END_FUNCTION
+
+FUNCTION_BLOCK "FB_VariableSpeedController"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+   VAR_INPUT 
+      i_genSpeed_rpm : Real;
+      i_bldPitch1 : Real;
+   END_VAR
+
+   VAR_OUTPUT 
+      q_genTq_Nm : Real;
+   END_VAR
+
+   VAR 
+      stat_last_genTq : Real;
+      stat_VS_state : Real := 1.0;
+   END_VAR
+
+   VAR_TEMP 
+      temp_VS_minOMTq : Real;
+      temp_VS_maxOMTq : Real;
+      temp_genSpeed_flt_rads : Real;
+      temp_genSpeed_rads : Real;
+      temp_VS_spdErrAr : Real;
+      temp_VS_refSpd : Real;
+      temp_genBrTq : Real;
+      temp_genArTq : Real;
+      temp_VS_spdErrBr : Real;
+      temp_VS_constPwr_genTq : Real;
+      temp_VS_kOmega2_genTq : Real;
+      temp_torqueRef : Real;
+      temp_torqueRate : Real;
+   END_VAR
+
+   VAR CONSTANT 
+      VS_MINOMSPD : Real := 34.68;
+      VS_ARSATTQ : Real := 43093.51;
+      VS_RGN2K : Real := 2.526;
+      VS_RTPWR : Real := 5000000.0;
+      VS_GENEFF : Real := 94.4;
+      VS_REGION_1 : Real := 70.26;
+      RATE_GENSPEED : Real := 122.9;
+      RATE_TQ : Real := 43093.55;
+      MAX_TQ : Real := 47402.91;
+      MAX_RATE_TQ : Real := 15000.0;
+      RPM_TO_RADS : Real := 0.104719;
+      DEG_TO_RAD : Real := 0.01745329;
+      DTIME : Real := 0.0125;
+      LPF_FQ : Real := 1.5708;
+      KP_VS : Real := -988.02;
+      KI_VS : Real := -185.79;
+      MIN_TQ : Real := 0.0;
+      REGION_3_PWRCONST : Real := 3.0;
+      "REGION_2.5" : Real := 2.5;
+      REGION_2 : Real := 2.0;
+      "REGION_1.5" : Real := 1.5;
+      REGION_1 : Real := 1.0;
+      NON_REGION : Real := -1.0;
+   END_VAR
+
+
+BEGIN
+	#temp_genSpeed_rads := #i_genSpeed_rpm * #RPM_TO_RADS; //la entrada de simulink (OpenFAST) está en rpm.
+	
+	//filtramos la velocidad del generador
+	"inst_FiltroGenSpeed"(i_LPfilter:=#temp_genSpeed_rads,
+	                i_DT:=#DTIME,
+	                i_freq:=#LPF_FQ,
+	                i_reset:=FALSE,
+	                q_flt_sign=>#temp_genSpeed_flt_rads);
+	
+	//ComputeVariableReferences
+	#temp_VS_refSpd := #RATE_GENSPEED;
+	IF "Inst_SetpointS".q_omega_flt > 0 THEN
+	    #temp_VS_refSpd := #temp_VS_refSpd - "Inst_SetpointS".q_omega_flt;
+	END_IF;
+	
+	//PI para regiones .5
+	#temp_VS_spdErrAr := #temp_VS_refSpd - #temp_genSpeed_flt_rads;  
+	#temp_VS_maxOMTq := #VS_RGN2K * #temp_VS_refSpd *#temp_VS_refSpd; 
+	"inst_PI_2_5"(i_error := #temp_VS_spdErrAr,
+	                          i_kp := #KP_VS,
+	                          i_ki := #KI_VS,
+	                          i_minValue := #temp_VS_maxOMTq,
+	                          i_maxValue := #VS_ARSATTQ,
+	                          i_DT := #DTIME,
+	                          i_I0 := #temp_VS_maxOMTq,
+	                          i_Reset := NOT "DatosGlobales".g_torqAutoMode,
+	                          q_PIController => #temp_genArTq);
+	
+	#temp_VS_spdErrBr := #VS_MINOMSPD - #temp_genSpeed_flt_rads;
+	#temp_VS_minOMTq := #VS_RGN2K * #VS_MINOMSPD*#VS_MINOMSPD;
+	"inst_PI_1_5"(i_error := #temp_VS_spdErrBr,
+	                            i_kp := #KP_VS,
+	                            i_ki := #KI_VS,
+	                            i_minValue := 0.0,
+	                            i_maxValue := #temp_VS_minOMTq,
+	                            i_DT := #DTIME,
+	                            i_I0 := #temp_VS_minOMTq,
+	                            i_Reset := NOT "DatosGlobales".g_torqAutoMode,
+	                            q_PIController => #temp_genBrTq);
+	
+	// calculamos torque para potencia constante (para la region III) -> P = W_angular * Torque.
+	#temp_VS_constPwr_genTq := #VS_RTPWR / (#VS_GENEFF / 100.0) / #temp_genSpeed_flt_rads;
+	              
+	//para la region 2: el torque optimo T = kw^2              
+	#temp_VS_kOmega2_genTq := #VS_RGN2K * #temp_genSpeed_flt_rads * #temp_genSpeed_flt_rads;
+	
+	// condiciones para la maquina de estados del generador. Solo si esta en modo automatico y no esta en paro de emergencia
+	IF "DatosGlobales".g_torqAutoMode AND NOT "DatosGlobales".g_paroEmerg THEN
+	    IF (#i_bldPitch1 >= (1.0*#DEG_TO_RAD) + ("Inst_PeakS".g_bldPitchMinSS +"Inst_ForeAftDamping".q_FA_PitCom+"IPC".PitComIPC_1P[0])) AND "DatosGlobales".g_bldPitchAutoMode THEN  //Entramos en la region III
+	        #stat_VS_state := #REGION_3_PWRCONST;
+	    ELSE
+	        IF #temp_genArTq >= #temp_VS_maxOMTq * 1.01 THEN   // REGION 2 1/2 - activamos PI para el control del torque
+	            #stat_VS_state := #"REGION_2.5";
+	        ELSIF #temp_genSpeed_flt_rads < #temp_VS_refSpd AND #temp_genBrTq >= #temp_VS_minOMTq THEN //REGION 2 - proporcional k w
+	            #stat_VS_state := #REGION_2;
+	        ELSIF #temp_genBrTq < #temp_VS_minOMTq THEN //REGION 1 1/2 - active PI control
+	            #stat_VS_state := #"REGION_1.5";
+	        ELSIF #temp_genSpeed_flt_rads < #VS_REGION_1 THEN //REGION 1
+	            #stat_VS_state := #REGION_1;
+	        END_IF;
+	    END_IF;
+	    
+	    
+	    // maquina de estados
+	    IF #stat_VS_state = #REGION_1 THEN
+	        #temp_torqueRef := #MIN_TQ;
+	    ELSIF #stat_VS_state = #"REGION_1.5" THEN
+	        #temp_torqueRef := #temp_genBrTq;
+	    ELSIF #stat_VS_state = #REGION_2 THEN
+	        #temp_torqueRef := #temp_VS_kOmega2_genTq;
+	    ELSIF #stat_VS_state = #"REGION_2.5" THEN
+	        #temp_torqueRef := #temp_genArTq;
+	    ELSIF #stat_VS_state = #REGION_3_PWRCONST THEN
+	        #temp_torqueRef := #temp_VS_constPwr_genTq;
+	    ELSE //estado de debug
+	        #stat_VS_state := #stat_VS_state;
+	    END_IF;
+	    
+	    
+	END_IF;
+	
+	
+	    //Modo manual 
+	IF NOT "DatosGlobales".g_torqAutoMode THEN
+	    // referencia directamente pasada de la variable manual (lazo 'abierto' computacionalmente hablando)
+	    #temp_torqueRef := "DatosGlobales".g_torqManualValue;
+	    #stat_VS_state := #NON_REGION;
+	END_IF;
+	
+	
+	IF "DatosGlobales".g_paroEmerg THEN
+	    // automaticamente a 0.0 y ponemos el modo manual
+	    "DatosGlobales".g_torqAutoMode := FALSE;
+	    #temp_torqueRef := 0.0;
+	    #stat_VS_state := #NON_REGION;
+	END_IF;
+	
+	//pasar al scada
+	"DatosGlobales".g_torqManualValue := REAL_TO_DINT(#temp_torqueRef);
+	// se puede pasar antes de los limites, para ver el setpoint directamente
+	// o despues de los limites, para ver el valor real
+	
+	// limitador de tasa de cambio
+	#temp_torqueRate := (#temp_torqueRef - #stat_last_genTq) / #DTIME;
+	IF #temp_torqueRate > #MAX_RATE_TQ THEN
+	    #temp_torqueRef := #stat_last_genTq + #MAX_RATE_TQ * #DTIME;
+	ELSIF #temp_torqueRate < - #MAX_RATE_TQ THEN
+	    #temp_torqueRef := #stat_last_genTq - #MAX_RATE_TQ * #DTIME;
+	END_IF;
+	// saturación de los límites de par
+	IF #temp_torqueRef > #MAX_TQ THEN
+	    #temp_torqueRef := #MAX_TQ;
+	END_IF;
+	IF #temp_torqueRef < #MIN_TQ THEN
+	    #temp_torqueRef := #MIN_TQ;
+	END_IF;
+	
+	//guardamos el paso anterior
+	#stat_last_genTq := #temp_torqueRef;
+	//salida hacia simulink
+	#q_genTq_Nm := #temp_torqueRef;
+	
+	
+END_FUNCTION_BLOCK
+
+FUNCTION_BLOCK "FB_PitchController"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+   VAR_INPUT 
+      i_genSpeed_rpm : Real;
+      i_bldPitch1 : LReal;
+      i_ncIMUTAxs : LReal;
+   END_VAR
+
+   VAR_OUTPUT 
+      q_bldPitch3_rad : Real;
+      q_bldPitch2_rad : Real;
+      q_bldPitch1_rad : Real;
+   END_VAR
+
+   VAR 
+      stat_lastBldPitch : Real;
+      stat_FA_PitCom : Real;
+      Stat_PC_SpdErr : Real;
+      stat_lastBldPitch_deg : Real;
+      stat_bldPitches : Array[0..2] of Real;
+      stat_lastBldPitches : Array[0..2] of Real;
+      stat_shutdown_ok : Bool;
+   END_VAR
+
+   VAR_TEMP 
+      temp_genSpeed_rads : Real;
+      temp_GenSpeed_flt_rads : Real;
+      temp_PC_refSpd : Real;
+      temp_bldPitch1_deg : Real;
+      temp_bldPitch1_flt : Real;
+      temp_bldPitchRef : Real;
+      temp_bldPitchRate : Real;
+      temp_bldPitchRef_rad : Real;
+      temp_k_i : Real;
+      temp_k_p : Real;
+      temp_i : Int;
+   END_VAR
+
+   VAR CONSTANT 
+      VS_REGION_1 : Real := 70.26;
+      MAX_PITCH : Real := 1.57;
+      MIN_PITCH : Real := 0.0;
+      MAX_PITCH_RATE : Real := 0.1396;
+      DTIME : Real := 0.0125;
+      RPM_TO_RADS : Real := 0.1047198;
+      RAD_TO_DEG : Real := 57.29578;
+      LPF_FQ : Real := 1.5708;
+      RATE_VS : Real := 122.9;
+   END_VAR
+
+
+BEGIN
+	// entrada de simulink (salida de OpenFAST) en rpm
+	#temp_genSpeed_rads := #i_genSpeed_rpm * #RPM_TO_RADS;
+	
+	// filtramos la velocidad del generador 
+	"inst_FiltroGenSpeed"(i_LPfilter:=#temp_genSpeed_rads,
+	                 i_DT:=#DTIME,
+	                 i_freq:=#LPF_FQ,
+	                 i_reset:=FALSE,
+	                 q_flt_sign=>#temp_GenSpeed_flt_rads);
+	
+	// filtramos el pitch de entrada
+	"inst_BldPitchSecLPFilter"(i_signal:=#i_bldPitch1,
+	                 i_DT:=#DTIME,
+	                 i_freq:=#LPF_FQ*0.25,
+	                 i_damp:=0.7,
+	                 i_reset:=FALSE,
+	                 i_useInitialValue:=FALSE,
+	                 q_signal_flt=>#temp_bldPitch1_flt);
+	
+	// ajustamos setpoint con la función SS
+	#temp_PC_refSpd := #RATE_VS;
+	IF "Inst_SetpointS".q_omega_flt < 0 THEN
+	    #temp_PC_refSpd := #temp_PC_refSpd - "Inst_SetpointS".q_omega_flt;
+	END_IF;
+	
+	
+	//Control pitch
+	
+	#temp_bldPitch1_deg := LREAL_TO_REAL(#temp_bldPitch1_flt) * #RAD_TO_DEG;
+	
+	// limites del gain scheduling
+	IF #temp_bldPitch1_deg < 3.0 THEN
+	    #temp_k_i := -0.005486;
+	    #temp_k_p := -0.014943;
+	ELSIF #temp_bldPitch1_deg > 23.0 THEN
+	    #temp_k_i := -0.001338;
+	    #temp_k_p := -0.000912;
+	ELSE  // polinomio de segundo grado aproximado al unir los puntos de la recta proporcionada por ROSCO
+	    #temp_k_p := (-0.0000304 * (#temp_bldPitch1_deg * #temp_bldPitch1_deg)) + (0.0014813 * #temp_bldPitch1_deg) - 0.0191187;
+	    #temp_k_i := (-0.00000898 * (#temp_bldPitch1_deg * #temp_bldPitch1_deg)) + (0.0004379 * #temp_bldPitch1_deg) - 0.0067204;
+	END_IF;
+	
+	// calculamos el error
+	#Stat_PC_SpdErr := #temp_PC_refSpd - #temp_GenSpeed_flt_rads;
+	"inst_BldPitchPI"(i_error := #Stat_PC_SpdErr,
+	                  i_kp := #temp_k_p,
+	                  i_ki := #temp_k_i,
+	                  i_minValue := "Inst_PeakS".g_bldPitchMinSS,
+	                  i_maxValue := #MAX_PITCH,
+	                  i_DT := #DTIME,
+	                  i_I0 := LREAL_TO_REAL(#i_bldPitch1),
+	                  i_Reset := NOT "DatosGlobales".g_bldPitchAutoMode,
+	                  "q_PIController" => #temp_bldPitchRef);
+	// le sumo el efecto de FA
+	#temp_bldPitchRef := #temp_bldPitchRef + "Inst_ForeAftDamping".q_FA_PitCom;
+	
+	// aplico el minimo de PS (se aplica al CPC no al IPC )
+	IF #temp_bldPitchRef < "Inst_PeakS".g_bldPitchMinSS THEN
+	    #temp_bldPitchRef := "Inst_PeakS".g_bldPitchMinSS;
+	END_IF;
+	
+	// sumamos el efecto del IPC
+	FOR #temp_i := 0 TO 2 DO
+	    #stat_bldPitches[#temp_i] := #temp_bldPitchRef + LREAL_TO_REAL("IPC_prueba".PitComIPC_1P[#temp_i]);
+	END_FOR;
+	
+	
+	// si esta en modo manual, hacer caso a la variable del SCADA 
+	IF NOT "DatosGlobales".g_bldPitchAutoMode THEN
+	    FOR #temp_i := 0 TO 2 DO
+	        #stat_bldPitches[#temp_i] := "DatosGlobales".g_bldPitchManualValue * (1.0 / #RAD_TO_DEG);
+	    END_FOR;
+	END_IF;
+	
+	
+	// si está apagado y se enciende.
+	IF #stat_shutdown_ok AND NOT "DatosGlobales".g_paroEmerg THEN
+	    
+	    //Modo manual, control del operario
+	    "DatosGlobales".g_torqAutoMode := FALSE;
+	    "DatosGlobales".g_bldPitchAutoMode := FALSE;
+	    
+	    //1.- se coloca a 20 grados. 
+	    FOR #temp_i := 0 TO 2 DO
+	        #stat_bldPitches[#temp_i] := 15.0 * (1.0 / #RAD_TO_DEG);
+	    END_FOR;
+	    IF #temp_genSpeed_rads >= #VS_REGION_1 THEN //2.- se espera a que el rotor coja inercia.
+	        FOR #temp_i := 0 TO 2 DO //3.- pitch a 0
+	            #stat_bldPitches[#temp_i] := 0.0;
+	        END_FOR;
+	        IF #stat_lastBldPitches[0] < (1.0 * (1.0 / #RAD_TO_DEG)) THEN
+	            "DatosGlobales".g_torqAutoMode := TRUE;
+	            "DatosGlobales".g_bldPitchAutoMode := TRUE;
+	            #stat_shutdown_ok := FALSE;
+	        END_IF;
+	    
+	    
+	
+	    END_IF;
+	END_IF;
+	
+	
+	// si se pulsa la seta de emergencia
+	IF "DatosGlobales".g_paroEmerg THEN
+	    #stat_shutdown_ok := FALSE;
+	    "DatosGlobales".g_torqAutoMode := FALSE;
+	    "DatosGlobales".g_bldPitchAutoMode := FALSE;
+	    
+	    FOR #temp_i := 0 TO 2 DO
+	        #stat_bldPitches[#temp_i] := #MAX_PITCH; // consigna de 90 grados (parada)
+	    END_FOR;
+	    IF #i_genSpeed_rpm < 100.0 THEN
+	        #stat_shutdown_ok := TRUE;
+	    END_IF;
+	    
+	    
+	END_IF;
+	
+	//visualizar en scada (BARRA)
+	"DatosGlobales".g_bldPitchManualValue := REAL_TO_INT(#stat_bldPitches[0] * #RAD_TO_DEG);
+	
+	//tasa de cambio y limite superior a todas las palas
+	
+	FOR #temp_i := 0 TO 2 DO
+	    #temp_bldPitchRate := (#stat_bldPitches[#temp_i] - #stat_lastBldPitches[#temp_i]) / #DTIME;
+	    IF #temp_bldPitchRate > #MAX_PITCH_RATE THEN
+	        #stat_bldPitches[#temp_i] := #stat_lastBldPitches[#temp_i] + #MAX_PITCH_RATE * #DTIME;
+	    ELSIF #temp_bldPitchRate < - #MAX_PITCH_RATE THEN
+	        #stat_bldPitches[#temp_i] := #stat_lastBldPitches[#temp_i] - #MAX_PITCH_RATE * #DTIME;
+	    END_IF;
+	    IF #stat_bldPitches[#temp_i] > #MAX_PITCH THEN
+	        #stat_bldPitches[#temp_i] := #MAX_PITCH;
+	    END_IF;
+	    #temp_bldPitchRate := 0.0; //inicializo
+	END_FOR;
+	
+	// creo una variable para visualizarla en grados en el scada (GRAFICA)
+	#stat_lastBldPitch_deg := #stat_bldPitches[0] * #RAD_TO_DEG;
+	// salida hacia simulink
+	#q_bldPitch1_rad := #stat_bldPitches[0];
+	#q_bldPitch2_rad := #stat_bldPitches[1];
+	#q_bldPitch3_rad := #stat_bldPitches[2];
+	
+	// guardo los ultimos valores
+	#stat_lastBldPitches[0] := #q_bldPitch1_rad;
+	#stat_lastBldPitches[1] := #q_bldPitch2_rad;
+	#stat_lastBldPitches[2] := #q_bldPitch3_rad;
+	
+	//ultimo valor del CPC
+	#stat_lastBldPitch := #temp_bldPitchRef;
+	
+END_FUNCTION_BLOCK
+
+FUNCTION_BLOCK "FB_IPC"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+   VAR_INPUT 
+      i_rootMyc1 : LReal;
+      i_rootMyc2 : LReal;
+      i_rootMyc3 : LReal;
+      i_genSpeed : LReal;
+      i_azimuth : LReal;
+      i_wind_flt : LReal;
+      i_enable : Bool;
+   END_VAR
+
+   VAR_OUTPUT 
+      q_pitComIPC_1P : Array[0..2] of LReal;
+   END_VAR
+
+   VAR 
+      stat_IPC_KP : Real := 0.0;
+      stat_IPC_KI : Real := 1.025E-06;
+      stat_IntIPC : Real := 0.3;
+      stat_windStartIPC : Real := 9.12;
+      stat_windStopIPC : Real := 11.4;
+   END_VAR
+
+   VAR_TEMP 
+      temp_rootMOOP : Array[1..3] of LReal;
+      temp_axTOut : Real;
+      temp_axYOut : Real;
+      temp_FA_PitCom : LReal;
+      temp_IPC_Kp_1p : Real;
+      temp_IPC_Ki_1p : Real;
+      temp_IPC_axisTilt_1P : LReal;
+      temp_IPC_axisYaw_1P : LReal;
+      temp_rootMycF1_flt : LReal;
+      temp_rootMycF2_flt : LReal;
+      temp_rootMycF3_flt : LReal;
+   END_VAR
+
+   VAR CONSTANT 
+      DTIME : Real := 0.0125;
+      DEG_TO_RAD : Real := 0.0174532;
+      RPM_TO_RADS : Real := 0.1047197;
+      DAMP : Real := 0.7;
+   END_VAR
+
+
+BEGIN
+	
+	
+	"inst_NotchFilterSlopes1"(i_signal := #i_rootMyc1,
+	                          i_DT := #DTIME,
+	                          i_freq := (#i_genSpeed * #RPM_TO_RADS),
+	                          i_damp := #DAMP,
+	                          i_status := 1,
+	                          i_moving := "DatosGlobales".g_bldPitchAutoMode,
+	                          q_signal_flt => #temp_rootMycF1_flt);
+	"inst_NotchFilterSlopes2"(i_signal := #i_rootMyc2,
+	                          i_DT := #DTIME,
+	                          i_freq := #i_genSpeed * #RPM_TO_RADS,
+	                          i_damp := #DAMP,
+	                          i_status := 1,
+	                          i_moving := "DatosGlobales".g_bldPitchAutoMode,
+	                          q_signal_flt => #temp_rootMycF2_flt);
+	"inst_NotchFilterSlopes3"(i_signal := #i_rootMyc3,
+	                          i_DT := #DTIME,
+	                          i_freq := #i_genSpeed * #RPM_TO_RADS,
+	                          i_damp := #DAMP,
+	                          i_status := 1,
+	                          i_moving := "DatosGlobales".g_bldPitchAutoMode,
+	                          q_signal_flt => #temp_rootMycF3_flt);
+	#temp_rootMOOP[1] := #temp_rootMycF1_flt;
+	#temp_rootMOOP[2] := #temp_rootMycF2_flt;
+	#temp_rootMOOP[3] := #temp_rootMycF3_flt;
+	"FC_ColemanTransform"(i_rootMOOP := #temp_rootMOOP,
+	                      i_aziAngle := #i_azimuth * #DEG_TO_RAD,
+	                      i_nHarmonic := 1,
+	                      q_axTOut => #temp_axTOut,
+	                      q_axYOut => #temp_axYOut);
+	
+	#temp_IPC_Kp_1p := "FC_Sigma"(x := #i_wind_flt, x0 := #stat_windStartIPC, x1 := #stat_windStopIPC, y0 := 0.0, y1 := #stat_IPC_KP);
+	#temp_IPC_Ki_1p := "FC_Sigma"(x := #i_wind_flt, x0 := #stat_windStartIPC, x1 := #stat_windStopIPC, y0 := 0.0, y1 := #stat_IPC_KI);
+	
+	"inst_PI_IPC_T"(i_error := #temp_axTOut,
+	                i_kp := #temp_IPC_Kp_1p,
+	                i_ki := #temp_IPC_Ki_1p,
+	                i_minValue := - #stat_IntIPC,
+	                i_maxValue := #stat_IntIPC,
+	                i_DT := #DTIME,
+	                i_I0 := 0.0,
+	                i_Reset := NOT "DatosGlobales".g_bldPitchAutoMode, //poner NOT pitchAuto (si esta en manual se resetea)
+	                //i_Reset := "Inst_PitchController".stat_shutdown_ok,
+	                q_PIController => #temp_IPC_axisTilt_1P);
+	
+	"inst_PI_IPC_Y"(i_error := #temp_axYOut,
+	                i_kp := #temp_IPC_Kp_1p,
+	                i_ki := #temp_IPC_Ki_1p,
+	                i_minValue := - #stat_IntIPC,
+	                i_maxValue := #stat_IntIPC,
+	                i_DT := #DTIME,
+	                i_I0 := 0.0,
+	                i_Reset := NOT "DatosGlobales".g_bldPitchAutoMode, //poner NOT pitchAuto (si esta en manual se resetea)
+	                q_PIController => #temp_IPC_axisYaw_1P);
+	
+	"FC_ColemanTransformInverse"(i_axTIn := #temp_IPC_axisTilt_1P,
+	                             i_axYIn := #temp_IPC_axisYaw_1P,
+	                             i_aziAngle := #i_azimuth * #DEG_TO_RAD,
+	                             i_aziOffset := 0.0,
+	                             i_nHarmonic := 1,
+	                             q_pitComIPC => #q_pitComIPC_1P);
+	IF #i_enable THEN
+	    
+	    #q_pitComIPC_1P[0] := 0.0;
+	    #q_pitComIPC_1P[1] := 0.0;
+	    #q_pitComIPC_1P[2] := 0.0;
+	    
+	END_IF;
+	
+	
+	
+	
+END_FUNCTION_BLOCK
+
+DATA_BLOCK "Inst_IPC"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+"FB_IPC"
+
+BEGIN
+
+END_DATA_BLOCK
+
+FUNCTION "FC_PeakShaving" : Real
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+   VAR_INPUT 
+      i_wind_flt : Real;
+      i_numPuntos : Int;
+      i_tablaVientos : Array[*] of Real;
+      i_tablaPitch : Array[*] of Real;
+      i_enable : Bool;
+   END_VAR
+
+   VAR_TEMP 
+      i : Int;
+      Pitch_Peak_Shaving : Real;
+      x0 : Real;
+      x1 : Real;
+      y0 : Real;
+      y1 : Real;
+      Limite_Inferior_Array : DInt;
+   END_VAR
+
+
+BEGIN
+	#Limite_Inferior_Array := LOWER_BOUND(ARR := #i_tablaVientos, DIM := 1);
+	
+	IF #i_wind_flt <= #i_tablaVientos[#Limite_Inferior_Array] THEN
+	    #Pitch_Peak_Shaving := #i_tablaPitch[#Limite_Inferior_Array];
+	ELSIF #i_wind_flt >= #i_tablaVientos[#Limite_Inferior_Array + #i_numPuntos - 1] THEN
+	    #Pitch_Peak_Shaving := #i_tablaPitch[#Limite_Inferior_Array + #i_numPuntos - 1];
+	ELSE
+	    FOR #i := DINT_TO_INT(#Limite_Inferior_Array) TO (DINT_TO_INT(#Limite_Inferior_Array) + #i_numPuntos - 2) DO
+	        IF (#i_wind_flt >= #i_tablaVientos[#i]) AND (#i_wind_flt < #i_tablaVientos[#i + 1]) THEN
+	            #x0 := #i_tablaVientos[#i];
+	            #x1 := #i_tablaVientos[#i + 1];
+	            #y0 := #i_tablaPitch[#i];
+	            #y1 := #i_tablaPitch[#i + 1];
+	            IF (#x1 - #x0) <> 0.0 THEN
+	                #Pitch_Peak_Shaving := #y0 + ((#i_wind_flt - #x0) * (#y1 - #y0) / (#x1 - #x0));
+	            ELSE
+	                #Pitch_Peak_Shaving := #y0;
+	            END_IF;
+	            EXIT;
+	        END_IF;
+	        
+	    END_FOR;
+	END_IF;
+	
+	IF #i_enable THEN
+	    IF #Pitch_Peak_Shaving > 0.0 THEN
+	        #FC_PeakShaving := #Pitch_Peak_Shaving;
+	    ELSE
+	        #FC_PeakShaving := 0.0;
+	    END_IF;
+	ELSE
+	    #FC_PeakShaving := 0.0;
+	END_IF;
+	
+	
+END_FUNCTION
+
+DATA_BLOCK "Inst_PitchController"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+"FB_PitchController"
+
+BEGIN
+
+END_DATA_BLOCK
+
+DATA_BLOCK "Inst_VariableSpeedController"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+"FB_VariableSpeedController"
+
+BEGIN
+
+END_DATA_BLOCK
+
+DATA_BLOCK "inst_FiltroViento"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+"FB_LPFilter"
+
+BEGIN
+
+END_DATA_BLOCK
+
+DATA_BLOCK "DatosDEL"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.1
+NON_RETAIN
+   STRUCT 
+      trigger : Bool;
+      finish : Bool;
+      DEL : Real;
+      dano : Real;
+   END_STRUCT;
+
+
+BEGIN
+
+END_DATA_BLOCK
+
+DATA_BLOCK "LPFilter_DB_2"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+NON_RETAIN
+"FB_LPFilter"
+
+BEGIN
+
+END_DATA_BLOCK
+
