@@ -5,7 +5,7 @@ Este repositorio contiene la traducción y ha sido validado matemática/estadís
 -optimización: estructurado para entornos industriales deterministas en tiempo real. 
 -estado actual: lógica principal de control de pitch y par electromagnetio operativa (incluyendo modulos para la protección de la estructura como por ejemplo IPC o Fore aft damping, reduciendo el DEL). a futuras: turbinas flotantes, estimador de viento y más cambios sutiles. a futuras:  se ha observado que el fore-aft damping aumenta el DEL (damage) de las bases de las palas. 
 
-# Publicación (Jornadas de Automatización 2026)
+# Publicación
 Este desarrollo y su validación forman parte del artículo técnico aceptado para su presentación en las Jornadas de Automatización 2026 (Córdoba, España).
 
 # Instrucciones de implementación
