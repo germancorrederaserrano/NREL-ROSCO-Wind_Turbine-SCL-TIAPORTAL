@@ -15,4 +15,4 @@ modelo usado: 5MW_Land_DLL_WTurb
 
 # Propiedad Intelectual y Licencia
 Copyright (C) 2026 Germán Corredera Serrano. Todos los derechos reservados.
-El código se expone exclusivamente con fines académicos, demostrativos y de revisión para las Jornadas de Automatización. Queda prohibida su reproducción o uso comercial sin autorización explícita del autor.
+El código se expone exclusivamente con fines académicos y demostrativos. Queda prohibida su reproducción o uso comercial sin autorización explícita del autor.
